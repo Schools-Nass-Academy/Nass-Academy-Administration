@@ -2532,22 +2532,37 @@
       localStorage.removeItem(AUTH_USER_KEY);
     }
 
-    // يبني كائن يحاكي شكل google.script.run.<function>().withSuccessHandler().withFailureHandler()
+    // يبني كائن يحاكي شكل google.script.run.withSuccessHandler(...).withFailureHandler(...).functionName(args)
     // حتى تبقى كل استدعاءات الكود القديمة (31 استدعاء) كما هي دون أي تعديل.
-    function callServerFunction(fnName, args) {
-      let successHandler = null;
-      let failureHandler = null;
-      const callObj = {
-        withSuccessHandler(fn) { successHandler = fn; return callObj; },
-        withFailureHandler(fn) { failureHandler = fn; return callObj; },
-        withUserObject() { return callObj; } // غير مستخدمة هنا لكن نبقيها للتوافق
-      };
+    // مهم: withSuccessHandler / withFailureHandler / withUserObject هي "دوال بناء"
+    // فقط تجمّع الـ callbacks، ولا تُطلق أي طلب. الطلب الفعلي يُطلق فقط لما
+    // نصل لاسم الدالة الحقيقي (مثل .checkUserLogin(...)) ونستدعيه.
+    function makeScriptRunner(handlers) {
+      return new Proxy({}, {
+        get(target, prop) {
+          if (prop === "withSuccessHandler") {
+            return function(fn) { return makeScriptRunner(Object.assign({}, handlers, { success: fn })); };
+          }
+          if (prop === "withFailureHandler") {
+            return function(fn) { return makeScriptRunner(Object.assign({}, handlers, { failure: fn })); };
+          }
+          if (prop === "withUserObject") {
+            return function() { return makeScriptRunner(handlers); }; // غير مستخدمة فعلياً هنا
+          }
+          // أي اسم آخر = اسم دالة الخادم الحقيقي المطلوب استدعاؤه
+          return function(...args) {
+            callServerFunction(prop, args, handlers.success, handlers.failure);
+          };
+        }
+      });
+    }
 
+    function callServerFunction(fnName, args, successHandler, failureHandler) {
       if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf("PASTE_YOUR") === 0) {
         const msg = "لم يتم ضبط رابط الخادم (APPS_SCRIPT_URL) بعد. راجع ملف DEPLOY.md";
         console.error(msg);
         if (failureHandler) setTimeout(() => failureHandler({ message: msg }), 0);
-        return callObj;
+        return;
       }
 
       fetch(APPS_SCRIPT_URL, {
@@ -2570,19 +2585,14 @@
           console.error("Network error calling " + fnName, err);
           if (failureHandler) failureHandler({ message: "تعذر الاتصال بالخادم" });
         });
-
-      return callObj;
     }
 
     // نفس واجهة google.script.run تماماً، لكن مبنية فوق fetch()
     window.google = window.google || {};
     window.google.script = window.google.script || {};
-    window.google.script.run = new Proxy({}, {
-      get(target, fnName) {
-        return function(...args) { return callServerFunction(fnName, args); };
-      }
-    });
+    window.google.script.run = makeScriptRunner({});
     // ==========================================================
+
 
     // ===== المتغيرات العامة =====
     let currentTableData = [];
